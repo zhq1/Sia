@@ -17,7 +17,6 @@ import (
 
 	"github.com/sasha-s/go-deadlock"
 
-	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/encoding"
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/persist"
@@ -66,10 +65,10 @@ func (h *Handler) parseRequest() (*types.StratumRequest, error) {
 			// h.log.Printf("%s: Harmless timeout occurred\n", h.s.printID())
 			//h.conn.SetReadDeadline(time.Time{})
 			// check last job time and if over 25 seconds, send a new job.
-			if time.Now().Sub(h.s.lastJobTimestamp) > (time.Second * 25) {
-				m.Method = "mining.notify"
-				break
-			}
+			// if time.Now().Sub(h.s.lastJobTimestamp) > (time.Second * 25) {
+			// 	m.Method = "mining.notify"
+			// 	break
+			// }
 			if h.s.DetectDisconnected() {
 				h.log.Println("Non-responsive disconnect detected!")
 				return nil, errors.New("Non-responsive disconnect detected")
@@ -82,6 +81,11 @@ func (h *Handler) parseRequest() (*types.StratumRequest, error) {
 				err = h.sendSetDifficulty(h.s.CurrentDifficulty())
 				if err != nil {
 					h.log.Println("Error sending SetDifficulty")
+					return nil, err
+				}
+				err = h.sendStratumNotify(true)
+				if err != nil {
+					h.log.Println("Error sending stratum notify")
 					return nil, err
 				}
 			}
@@ -268,7 +272,7 @@ func (h *Handler) handleStratumSubscribe(m *types.StratumRequest) error {
 
 	//	diff := "b4b6693b72a50c7116db18d6497cac52"
 	t, _ := h.p.persist.Target.Difficulty().Uint64()
-	h.log.Debugf("Difficulty: %x\n", t)
+	h.log.Debugf("Block Difficulty: %x\n", t)
 	tb := make([]byte, 8)
 	binary.LittleEndian.PutUint64(tb, t)
 	diff := hex.EncodeToString(tb)
@@ -288,9 +292,12 @@ func (h *Handler) setupClient(client, worker string) (*Client, error) {
 	var err error
 	h.p.clientSetupMutex.Lock()
 	defer h.p.clientSetupMutex.Unlock()
-	c := h.p.FindClientDB(client)
+	c, err := h.p.FindClientDB(client)
+	if err != ErrNoUsernameInDatabase {
+		return c, err
+	}
 	if c == nil {
-		//fmt.Printf("Unable to find client: %s\n", client)
+		//fmt.Printf("Unable to find client in db: %s\n", client)
 		c, err = newClient(h.p, client)
 		if err != nil {
 			//fmt.Println("Failed to create a new Client")
@@ -362,10 +369,16 @@ func (h *Handler) handleStratumAuthorize(m *types.StratumRequest) error {
 
 	c, err := h.setupClient(clientName, workerName)
 	if err != nil {
+		r.Result = false
+		r.Error = interfaceify([]string{err.Error()})
+		h.sendResponse(r)
 		return err
 	}
 	w, err := h.setupWorker(c, workerName)
 	if err != nil {
+		r.Result = false
+		r.Error = interfaceify([]string{err.Error()})
+		h.sendResponse(r)
 		return err
 	}
 
@@ -517,6 +530,7 @@ func (h *Handler) handleStratumSubmit(m *types.StratumRequest) error {
 	if err != nil && err != modules.ErrBlockUnsolved {
 		h.log.Printf("Failed to SubmitBlock(): %v\n", err)
 		h.log.Printf(sPrintBlock(b))
+		panic(fmt.Sprintf("Failed to SubmitBlock(): %v\n", err))
 		r.Result = false //json.RawMessage(`false`)
 		r.Error = interfaceify([]string{"20", "Stale share"})
 		h.s.CurrentWorker.IncrementInvalidShares()
@@ -542,9 +556,6 @@ func (h *Handler) handleStratumSubmit(m *types.StratumRequest) error {
 }
 
 func (h *Handler) sendSetDifficulty(d float64) error {
-	if build.Release == "testing" {
-		return nil // not adjust for testing
-	}
 	var r types.StratumRequest
 
 	r.Method = "mining.set_difficulty"
